@@ -29,9 +29,8 @@ def normalize_numeric_strings(df: pd.DataFrame) -> pd.DataFrame:
         if out[col].dtype == object:
             s = out[col].astype(str).str.replace("\u00A0", " ", regex=False).str.strip()
             def to_float_safe(x: str):
-                if not any(ch.isdigit() for ch in x): 
+                if not any(ch.isdigit() for ch in x):
                     return x
-                # univerzální převod – povolí i „1 234,56“
                 try:
                     return float(x.replace(" ", "").replace(",", "."))
                 except Exception:
@@ -129,13 +128,15 @@ def plot_series(series: pd.Series, title: str, ylabel: str) -> bytes:
     return buf.read()
 
 # ---------- Trade Analysis helpers ----------
-def combine_date_time_manual(df: pd.DataFrame, date_col: str, time_col: Optional[str], dayfirst: bool) -> pd.Series:
+def combine_date_time_manual(df: pd.DataFrame, date_col: str, time_col: Optional[str], dayfirst: bool, hour_shift: int = 0) -> pd.Series:
     if time_col and time_col != "(žádný)":
-        dt = pd.to_datetime(df[date_col].astype(str) + " " + df[time_col].astype(str),
+        ts = pd.to_datetime(df[date_col].astype(str) + " " + df[time_col].astype(str),
                             errors="coerce", dayfirst=dayfirst)
     else:
-        dt = pd.to_datetime(df[date_col], errors="coerce", dayfirst=dayfirst)
-    return dt
+        ts = pd.to_datetime(df[date_col], errors="coerce", dayfirst=dayfirst)
+    if hour_shift:
+        ts = ts + pd.to_timedelta(hour_shift, unit="h")
+    return ts
 
 def weekday_metrics_from(df: pd.DataFrame, pnl_col: str, ts: pd.Series) -> pd.DataFrame:
     pnl = pd.to_numeric(df[pnl_col], errors="coerce")
@@ -175,8 +176,11 @@ def weekday_metrics_from(df: pd.DataFrame, pnl_col: str, ts: pd.Series) -> pd.Da
     return out
 
 def bar_png(x, y, title: str, xlabel: str, ylabel: str) -> bytes:
+    # bezpečné typy pro Matplotlib (None -> "Unknown")
+    x_s = pd.Series(x).fillna("Unknown").astype(str).tolist()
+    y_s = pd.to_numeric(pd.Series(y), errors="coerce").fillna(0).tolist()
     fig, ax = plt.subplots()
-    ax.bar(x, y)
+    ax.bar(x_s, y_s)
     ax.set_title(title); ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
     buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches="tight"); plt.close(fig); buf.seek(0)
     return buf.read()
@@ -191,7 +195,7 @@ with tab1:
     if up1:
         df = read_csv_flexible(up1)
 
-        # pokus o seřazení podle času (nemění logiku equity)
+        # seřazení podle času (pokud máme časový sloupec)
         time_col_name = pick_time_col(df)
         if time_col_name and pd.api.types.is_datetime64_any_dtype(df[time_col_name]):
             df = df.sort_values(time_col_name).reset_index(drop=True)
@@ -244,24 +248,29 @@ with tab2:
     if up2:
         df_t = read_csv_flexible(up2)
 
-        # výběr P/L sloupce (auto + ruční)
+        # 2) Přesné texty u rolovátek
         lower = {c.lower(): c for c in df_t.columns}
         auto_pl = lower.get("profitlossafterslippage") or lower.get("profitloss") or lower.get("pnl") or lower.get("pl")
-        pl_choice = st.selectbox("Sloupec s P/L", [auto_pl] + [c for c in df_t.columns if c != auto_pl] if auto_pl else list(df_t.columns))
-        if not pl_choice:
-            st.error("Vyberte sloupec s P/L."); st.stop()
+        pl_choice = st.selectbox("Sloupec s P/L (ProfitLossAfterSlippage)",
+                                 [auto_pl] + [c for c in df_t.columns if c != auto_pl] if auto_pl else list(df_t.columns))
 
-        # ruční volba datumu/času
         options = ["(žádný)"] + df_t.columns.tolist()
-        date_col = st.selectbox("Sloupec s DATEM", options)
-        time_col = st.selectbox("Sloupec s ČASEM (volitelné)", options)
+        date_col = st.selectbox("Sloupec s datem (OpenDate) ", options)
+        time_col = st.selectbox("Sloupec s časem (OpenTime)", options)
         dayfirst = st.checkbox("Použít dayfirst (DD/MM vs MM/DD)", value=True)
+        shift = st.number_input("Posun času (hodiny, např. +6 = posun do US/Eastern)", value=0, step=1, format="%d")
 
-        if date_col == "(žádný)":
-            st.warning("Vyberte sloupec s DATEM pro rozpad podle dnů v týdnu.")
+        if not pl_choice:
+            st.error("Vyberte sloupec s P/L.")
+        elif date_col == "(žádný)":
+            st.warning("Vyberte sloupec s datem.")
         else:
-            ts = combine_date_time_manual(df_t, date_col, None if time_col == "(žádný)" else time_col, dayfirst)
+            ts = combine_date_time_manual(df_t, date_col, None if time_col == "(žádný)" else time_col, dayfirst, int(shift))
             metrics = weekday_metrics_from(df_t, pl_choice, ts)
+
+            # očista Weekday, aby grafy nikdy nespadly
+            metrics["Weekday"] = metrics["Weekday"].fillna("Unknown").astype(str)
+
             st.dataframe(metrics, use_container_width=True)
 
             if not metrics.empty:
