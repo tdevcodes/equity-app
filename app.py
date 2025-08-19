@@ -228,27 +228,30 @@ def weekday_metrics(df: pd.DataFrame, pnl_col: str) -> pd.DataFrame:
     pnl = pd.to_numeric(df[pnl_col], errors="coerce")
     temp = pd.DataFrame({"dt": dt, "pnl": pnl}).dropna(subset=["pnl"])  # dt může být NaT
 
+    # 0=Mon ... 6=Sun; pokud nemáme datum, označíme -1
     if temp["dt"].notna().any():
         temp["weekday"] = temp["dt"].dt.dayofweek
     else:
-        temp["weekday"] = -1  # Unknown
+        temp["weekday"] = -1
 
-    def pf(g):
-        pos = g.loc[g["pnl"] > 0, "pnl"].sum()
-        neg = -g.loc[g["pnl"] < 0, "pnl"].sum()
+    # KLÍČOVÁ OPRAVA: agregujeme nad Series 'pnl'
+    grp = temp.groupby("weekday", dropna=False)["pnl"]
+
+    def profit_factor(s: pd.Series) -> float:
+        pos = s[s > 0].sum()
+        neg = -s[s < 0].sum()
         return float(pos / neg) if neg > 0 else np.nan
 
-    grp = temp.groupby("weekday", dropna=False)
     out = grp.agg(
-        Trades=("pnl", "count"),
-        Wins=("pnl", lambda s: int((s > 0).sum())),
-        Losses=("pnl", lambda s: int((s < 0).sum())),
-        Winrate=("pnl", lambda s: float((s > 0).mean()) if len(s) else np.nan),
-        TotalProfit=("pnl", "sum"),
-        AvgProfit=("pnl", "mean"),
-        MedianProfit=("pnl", "median"),
-        ProfitFactor=("pnl", pf),
-        Expectancy=("pnl", "mean"),
+        Trades="count",
+        Wins=lambda s: int((s > 0).sum()),
+        Losses=lambda s: int((s < 0).sum()),
+        Winrate=lambda s: float((s > 0).mean()) if len(s) else np.nan,
+        TotalProfit="sum",
+        AvgProfit="mean",
+        MedianProfit="median",
+        ProfitFactor=profit_factor,
+        Expectancy="mean",
     ).reset_index()
 
     name_map = {-1: "Unknown", 0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
