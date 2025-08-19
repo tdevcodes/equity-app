@@ -46,7 +46,7 @@ def pick_time_col(df: pd.DataFrame) -> Optional[str]:
             return lower[key]
     return None
 
-# ---- původní ověřená logika pro Equity (beze změn) ----
+# ---- (beze změn) Equity logika pro 1. záložku ----
 def build_equity(df: pd.DataFrame, equity_source: str) -> Tuple[pd.Series, str]:
     lower = {c.lower(): c for c in df.columns}
     profit_col = lower.get("profitloss") or lower.get("pnl") or lower.get("pl")
@@ -61,14 +61,12 @@ def build_equity(df: pd.DataFrame, equity_source: str) -> Tuple[pd.Series, str]:
         if profit_col:
             eq = pd.to_numeric(df[profit_col], errors="coerce").fillna(0).cumsum()
             return eq, f"Equity = kumulativní '{profit_col}' (start 0)"
-        # fallback: první numerický sloupec
         num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         if num_cols:
             col = num_cols[0]
             return pd.to_numeric(df[col], errors="coerce"), f"Equity = fallback '{col}'"
         return pd.Series(dtype=float), "Nebylo možné sestavit equity (žádná numerická data)."
 
-    # Explicitní volby
     if equity_source in df.columns:
         return pd.to_numeric(df[equity_source], errors="coerce"), f"Equity = '{equity_source}'"
 
@@ -83,14 +81,8 @@ def build_equity(df: pd.DataFrame, equity_source: str) -> Tuple[pd.Series, str]:
 def compute_stats(eq: pd.Series, time_col: Optional[pd.Series]):
     eq = pd.to_numeric(eq, errors="coerce").dropna()
     if eq.empty or len(eq) < 2:
-        return {
-            "Points": len(eq),
-            "First equity": np.nan,
-            "Last equity": np.nan,
-            "Total return": np.nan,
-            "Max drawdown": np.nan,
-            "Sharpe (approx)": np.nan,
-        }
+        return {"Points": len(eq), "First equity": np.nan, "Last equity": np.nan,
+                "Total return": np.nan, "Max drawdown": np.nan, "Sharpe (approx)": np.nan}
 
     returns = eq.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
     roll_max = eq.cummax()
@@ -99,7 +91,6 @@ def compute_stats(eq: pd.Series, time_col: Optional[pd.Series]):
     total_return = (eq.iloc[-1] / eq.iloc[0] - 1.0) if eq.iloc[0] != 0 else np.nan
     max_dd = float(drawdown.min()) if not drawdown.empty else np.nan
 
-    # přibližný annualizační faktor
     periods_per_year = 252.0
     ann_factor = math.sqrt(periods_per_year)
     if time_col is not None and pd.api.types.is_datetime64_any_dtype(time_col):
@@ -111,14 +102,10 @@ def compute_stats(eq: pd.Series, time_col: Optional[pd.Series]):
 
     sharpe = (returns.mean() / (returns.std() + 1e-12)) * ann_factor if returns.std() > 0 else np.nan
 
-    return {
-        "Points": int(len(eq)),
-        "First equity": float(eq.iloc[0]),
-        "Last equity": float(eq.iloc[-1]),
-        "Total return": float(total_return),
-        "Max drawdown": float(max_dd),
-        "Sharpe (approx)": float(sharpe) if not math.isnan(sharpe) else np.nan,
-    }
+    return {"Points": int(len(eq)), "First equity": float(eq.iloc[0]),
+            "Last equity": float(eq.iloc[-1]), "Total return": float(total_return),
+            "Max drawdown": float(max_dd),
+            "Sharpe (approx)": float(sharpe) if not math.isnan(sharpe) else np.nan}
 
 def plot_series(series: pd.Series, title: str, ylabel: str) -> bytes:
     fig, ax = plt.subplots()
@@ -128,7 +115,14 @@ def plot_series(series: pd.Series, title: str, ylabel: str) -> bytes:
     return buf.read()
 
 # ---------- Trade Analysis helpers ----------
-def combine_date_time_manual(df: pd.DataFrame, date_col: str, time_col: Optional[str], dayfirst: bool, hour_shift: int = 0) -> pd.Series:
+def combine_datetime_from_entry(df: pd.DataFrame, entry_col: str, dayfirst: bool, hour_shift: int) -> pd.Series:
+    ts = pd.to_datetime(df[entry_col], errors="coerce", dayfirst=dayfirst)
+    if hour_shift:
+        ts = ts + pd.to_timedelta(hour_shift, unit="h")
+    return ts
+
+def combine_date_time_manual(df: pd.DataFrame, date_col: str, time_col: Optional[str],
+                             dayfirst: bool, hour_shift: int) -> pd.Series:
     if time_col and time_col != "(žádný)":
         ts = pd.to_datetime(df[date_col].astype(str) + " " + df[time_col].astype(str),
                             errors="coerce", dayfirst=dayfirst)
@@ -168,7 +162,11 @@ def weekday_metrics_from(df: pd.DataFrame, pnl_col: str, ts: pd.Series) -> pd.Da
 
     name_map = {-1: "Unknown", 0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
     out["Weekday"] = out["weekday"].map(name_map)
-    out = out.drop(columns=["weekday"]).sort_values("Weekday")
+    out = out.drop(columns=["weekday"])
+
+    # estetické pořadí
+    cat = pd.Categorical(out["Weekday"], categories=["Mon","Tue","Wed","Thu","Fri","Sat","Sun","Unknown"], ordered=True)
+    out = out.assign(Weekday=cat).sort_values("Weekday").reset_index(drop=True)
 
     for col in ["Winrate","AvgProfit","MedianProfit","TotalProfit","ProfitFactor","Expectancy"]:
         if col in out:
@@ -176,7 +174,6 @@ def weekday_metrics_from(df: pd.DataFrame, pnl_col: str, ts: pd.Series) -> pd.Da
     return out
 
 def bar_png(x, y, title: str, xlabel: str, ylabel: str) -> bytes:
-    # bezpečné typy pro Matplotlib (None -> "Unknown")
     x_s = pd.Series(x).fillna("Unknown").astype(str).tolist()
     y_s = pd.to_numeric(pd.Series(y), errors="coerce").fillna(0).tolist()
     fig, ax = plt.subplots()
@@ -185,17 +182,15 @@ def bar_png(x, y, title: str, xlabel: str, ylabel: str) -> bytes:
     buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches="tight"); plt.close(fig); buf.seek(0)
     return buf.read()
 
-# ---------- UI: dvě viditelné záložky (každá s vlastním uploaderem) ----------
+# ---------- UI: dvě záložky (každá s vlastním uploaderem) ----------
 tab1, tab2 = st.tabs(["Equity & Drawdown", "Trade Analysis (dny v týdnu)"])
 
-# ===== Tab 1: Equity & Drawdown (původní, beze změn) =====
+# ===== Tab 1: Equity & Drawdown (beze změn) =====
 with tab1:
     st.subheader("📈 Equity & Drawdown")
     up1 = st.file_uploader("Nahrajte CSV se stavem účtu / P&L", type=["csv"], key="eq_csv")
     if up1:
         df = read_csv_flexible(up1)
-
-        # seřazení podle času (pokud máme časový sloupec)
         time_col_name = pick_time_col(df)
         if time_col_name and pd.api.types.is_datetime64_any_dtype(df[time_col_name]):
             df = df.sort_values(time_col_name).reset_index(drop=True)
@@ -241,34 +236,47 @@ with tab1:
         else:
             st.warning("Nepodařilo se sestavit equity křivku. Zkontrolujte EndingBalance / OpeningBalance / ProfitLoss.")
 
-# ===== Tab 2: Trade Analysis (nová) =====
+# ===== Tab 2: Trade Analysis =====
 with tab2:
     st.subheader("📊 Analýza obchodů podle dnů v týdnu")
     up2 = st.file_uploader("Nahrajte CSV s obchody (musí obsahovat P/L)", type=["csv"], key="trades_csv")
     if up2:
         df_t = read_csv_flexible(up2)
 
-        # 2) Přesné texty u rolovátek
+        # P/L výběr (přesný popisek)
         lower = {c.lower(): c for c in df_t.columns}
         auto_pl = lower.get("profitlossafterslippage") or lower.get("profitloss") or lower.get("pnl") or lower.get("pl")
         pl_choice = st.selectbox("Sloupec s P/L (ProfitLossAfterSlippage)",
                                  [auto_pl] + [c for c in df_t.columns if c != auto_pl] if auto_pl else list(df_t.columns))
 
-        options = ["(žádný)"] + df_t.columns.tolist()
-        date_col = st.selectbox("Sloupec s datem (OpenDate) ", options)
-        time_col = st.selectbox("Sloupec s časem (OpenTime)", options)
-        dayfirst = st.checkbox("Použít dayfirst (DD/MM vs MM/DD)", value=True)
+        # ZDROJ ČASU: 1) EntryTime (default, pokud existuje), 2) OpenDate + OpenTime
+        entry_guess = lower.get("entrytime")
+        mode_default = 0 if entry_guess else 1
+        mode = st.radio("Zdroj času", ["Použít sloupec s časem (EntryTime)", "Použít kombinaci: datum + čas (OpenDate + OpenTime)"],
+                        index=mode_default)
+
+        dayfirst_default = False if entry_guess else True  # EntryTime bývá US (MM/DD), OpenDate často evropské (DD/MM)
+        dayfirst = st.checkbox("Použít dayfirst (DD/MM vs MM/DD)", value=dayfirst_default)
         shift = st.number_input("Posun času (hodiny, např. +6 = posun do US/Eastern)", value=0, step=1, format="%d")
 
         if not pl_choice:
             st.error("Vyberte sloupec s P/L.")
-        elif date_col == "(žádný)":
-            st.warning("Vyberte sloupec s datem.")
         else:
-            ts = combine_date_time_manual(df_t, date_col, None if time_col == "(žádný)" else time_col, dayfirst, int(shift))
-            metrics = weekday_metrics_from(df_t, pl_choice, ts)
+            if mode == "Použít sloupec s časem (EntryTime)":
+                if entry_guess is None:
+                    st.error("V souboru nevidím sloupec EntryTime. Přepněte na volbu 'datum + čas'.")
+                    st.stop()
+                ts = combine_datetime_from_entry(df_t, entry_guess, dayfirst, int(shift))
+            else:
+                options = ["(žádný)"] + df_t.columns.tolist()
+                date_col = st.selectbox("Sloupec s datem (OpenDate) ", options, index=(df_t.columns.tolist().index(lower.get("opendate", ""))+1) if lower.get("opendate") in df_t.columns else 0)
+                time_col = st.selectbox("Sloupec s časem (OpenTime)", options, index=(df_t.columns.tolist().index(lower.get("opentime", ""))+1) if lower.get("opentime") in df_t.columns else 0)
+                if date_col == "(žádný)":
+                    st.warning("Vyberte sloupec s datem.")
+                    st.stop()
+                ts = combine_date_time_manual(df_t, date_col, None if time_col == "(žádný)" else time_col, dayfirst, int(shift))
 
-            # očista Weekday, aby grafy nikdy nespadly
+            metrics = weekday_metrics_from(df_t, pl_choice, ts)
             metrics["Weekday"] = metrics["Weekday"].fillna("Unknown").astype(str)
 
             st.dataframe(metrics, use_container_width=True)
